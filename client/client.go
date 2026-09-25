@@ -262,6 +262,17 @@ type Client interface {
 //	NewClientWithConnection(conn *grpc.ClientConn, dialOpts ...grpc.DialOption) Client
 //	NewClientWithSocket(socket string, dialOpts ...grpc.DialOption) (client Client, err error)
 func NewClient(dialOpts ...grpc.DialOption) (client Client, err error) {
+	return NewClientWithContext(context.Background(), dialOpts...)
+}
+
+// NewClientWithContext instantiates Dapr client using DAPR_GRPC_PORT environment variable as port.
+// Note that the returned client is a singleton and is reused for the life of the process.
+//
+// The context is passed to a registered ConfigProvider, if any, so resolving the sidecar address
+// can be cancelled and can report an error. Resolution order is DAPR_GRPC_ENDPOINT, then the
+// registered provider, then DAPR_GRPC_PORT: the environment keeps winning, so nothing changes for
+// callers that do not register one.
+func NewClientWithContext(ctx context.Context, dialOpts ...grpc.DialOption) (client Client, err error) {
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -271,12 +282,30 @@ func NewClient(dialOpts ...grpc.DialOption) (client Client, err error) {
 
 	addr, ok := os.LookupEnv(daprGRPCEndpointEnvVarName)
 	if ok {
-		client, err = NewClientWithAddress(addr, dialOpts...)
+		client, err = NewClientWithAddressContext(ctx, addr, dialOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("error creating %q client: %w", daprGRPCEndpointEnvVarName, err)
 		}
 		defaultClient = client
 		return defaultClient, nil
+	}
+
+	if provider := configProvider(); provider != nil {
+		cfg, cfgErr := provider.Config(ctx)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("error resolving client configuration: %w", cfgErr)
+		}
+		if cfg.Address != "" {
+			client, err = NewClientWithAddressContext(ctx, cfg.Address, dialOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("error creating client for the resolved address: %w", err)
+			}
+			if cfg.APIToken != "" {
+				client.WithAuthToken(cfg.APIToken)
+			}
+			defaultClient = client
+			return defaultClient, nil
+		}
 	}
 
 	port, ok := os.LookupEnv(daprPortEnvVarName)
